@@ -17,6 +17,11 @@
 #include "v4l2uvc.h"
 #include "sonix_xu_ctrls.h"
 
-static int video_open(const char *devname);
+int video_open(const char *devname);
+int video_get_input(int dev);
+int video_set_format(int dev, unsigned int w, unsigned int h, unsigned int format);
+int video_set_framerate(int dev);
+int video_reqbufs(int dev, int nbufs);
+int video_enable(int dev, int enable);
 
 #endif

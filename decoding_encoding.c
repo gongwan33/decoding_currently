@@ -15,6 +15,9 @@
 #include "camera.h"
 
 #define INBUF_SIZE 4096
+#define DEBUG 0
+#define DISPLAY 1
+#define DEBUG_CAMBUF 0
 
 /*
  * Video decoding example
@@ -99,10 +102,18 @@ static void build_avpkt(AVPacket *avpkt, FILE *fp)
         writeptr -= readptr;  
         readptr = 0;  
         toread = FILE_READING_BUFFER - writeptr;  
-        len = fread(&buffer[writeptr], 1,toread, fp);  
+        len = fread(&buffer[writeptr], 1, toread, fp);  
         writeptr += len;  
     }  
-   
+  
+#if DEBUG_CAMBUF
+	int tmp_i = 0;
+	for(tmp_i = 0; tmp_i < buffer_dec_len; tmp_i++)
+        printf("0x%02x ", buffer_dec[tmp_i]);
+	printf("\n");
+	printf("len = %d buffer_dec_len = %d\n", len, buffer_dec_len);
+#endif
+
     nexthead = _find_head(&buffer[readptr], writeptr-readptr);  
     if (nexthead == 0)  
     {  
@@ -112,13 +123,142 @@ static void build_avpkt(AVPacket *avpkt, FILE *fp)
    
     avpkt->size = nexthead;  
     avpkt->data = &buffer[readptr];  
-    readptr += nexthead;  
-   
+    readptr += nexthead; 
 }
 
-static void camera_capture()
+static void video_decode_example(const char *outfilename, const char *filename)
 {
-	int dev;
+
+    AVCodec *codec;  
+    AVCodecContext *c= NULL;  
+    int frame, got_picture, len;  
+    FILE *f, *fout;  
+    AVFrame *picture;  
+    uint8_t inbuf[INBUF_SIZE + FF_INPUT_BUFFER_PADDING_SIZE];  
+    char buf[1024];  
+    AVPacket avpkt;  
+   
+    av_init_packet(&avpkt);  
+   
+    /* set end ofbuffer to 0 (this ensures that no overreading happens for damaged mpeg streams)*/  
+    memset(inbuf + INBUF_SIZE, 0, FF_INPUT_BUFFER_PADDING_SIZE);  
+   
+    printf("Videodecoding\n");  
+    //opts = NULL;  
+    /* find the h264video decoder */  
+    codec = avcodec_find_decoder(CODEC_ID_H264);  
+    if (!codec){  
+        fprintf(stderr, "codecnot found\n");  
+        return ;  
+    }  
+   
+    c = avcodec_alloc_context3(codec);  
+    picture= avcodec_alloc_frame();  
+   
+    if(codec->capabilities&CODEC_CAP_TRUNCATED)  
+    c->flags|= CODEC_FLAG_TRUNCATED; /* we do not send complete frames */  
+   
+    /* For somecodecs, such as msmpeg4 and mpeg4, width and height 
+    MUST be initialized there because thisinformation is not 
+    available in the bitstream. */  
+   
+    /* open it */  
+    if(avcodec_open2(c, codec, NULL) < 0) {  
+        fprintf(stderr, "couldnot open codec\n");  
+        exit(1);  
+    }  
+   
+    /* the codec givesus the frame size, in samples */  
+   
+    f = fopen(filename, "rb");  
+    if (!f) {  
+        fprintf(stderr, "couldnot open %s\n", filename);  
+        exit(1);  
+    }  
+
+     //解码与显示需要的辅助的数据结构，需要注意的是，AVFrame必须经过alloc才能使用，不然其内存的缓存空间指针是空的，程序会崩溃  
+    AVFrame frameRGB;  
+    cvNamedWindow("decode", CV_WINDOW_AUTOSIZE);  
+    frame = 0;  
+    for(;;) {  
+   
+        build_avpkt(&avpkt, f);  
+   
+        if(avpkt.size == 0)  
+            break;  
+   
+        while(avpkt.size > 0) {  
+            len = avcodec_decode_video2(c,picture, &got_picture, &avpkt);//解码每一帧  
+
+			IplImage *showImage = cvCreateImage(cvSize(picture->width, picture->height), 8, 3);  
+            avpicture_alloc((AVPicture*)&frameRGB, PIX_FMT_RGB24, picture->width, picture->height);  
+
+            if(len < 0) {  
+                fprintf(stderr, "Error while decoding frame %d\n",frame);  
+                break;  
+            }  
+            if(got_picture) {  
+                printf("savingframe %3d\n", frame);  
+                fflush(stdout);  
+   
+                /* thepicture is allocated by the decoder. no need to free it */  
+               //将YUV420格式的图像转换成RGB格式所需要的转换上下文  
+                struct SwsContext * scxt = (struct SwsContext *)sws_getContext(picture->width, picture->height, PIX_FMT_YUV420P,  
+                                                  picture->width, picture->height, PIX_FMT_RGB24,  
+                                                  2,NULL,NULL,NULL);  
+                if(scxt != NULL)  
+                {  
+                    sws_scale(scxt, picture->data, picture->linesize, 0, c->height, frameRGB.data, frameRGB.linesize);//图像格式转换  
+                    showImage->imageSize = frameRGB.linesize[0];//指针赋值给要显示的图像  
+                    showImage->imageData = (char *)frameRGB.data[0];  
+                    cvShowImage("decode", showImage);//显示 
+#if DISPLAY	
+                    cvWaitKey(50);//设置0.5s显示一帧，如果不设置由于这是个循环，会导致看不到显示出来的图像  
+#endif
+                }
+                //sprintf(buf,outfilename,frame);  
+   
+                //pgm_save(picture->data[0],picture->linesize[0],  
+                //c->width,c->height, buf);  
+                //pgm_save(picture->data[1],picture->linesize[1],  
+                //c->width/2,c->height/2, fout);  
+                //pgm_save(picture->data[2],picture->linesize[2],  
+                //c->width/2,c->height/2, fout);   
+				sws_freeContext(scxt);
+                frame++;  
+            }  
+            avpkt.size -= len;  
+            avpkt.data += len;  
+        }  
+    }  
+   
+    fclose(f);  
+   
+    avcodec_close(c);  
+    av_free(c);  
+    av_free(picture);  
+    printf("\n");  
+}
+#define V4L_BUFFERS_DEFAULT	8
+#define V4L_BUFFERS_MAX		32
+
+static int camera_capture()
+{
+	int dev = 0;
+	unsigned int width = 160;
+	unsigned int height = 120;
+	unsigned int ret = 0;
+	unsigned int pixelformat = V4L2_PIX_FMT_H264;
+	unsigned int nbufs = V4L_BUFFERS_DEFAULT;
+	struct v4l2_buffer buf;
+	int i = 0;
+	struct timeval start, end, ts;
+	unsigned int delay = 0;	
+	FILE *rec_fp = NULL;
+	char rec_filename[] = "RecordH264.h264";/*"H264.ts"*/
+	void *mem[V4L_BUFFERS_MAX];
+	double fps;
+
 	dev = video_open("/dev/video1");
 	if (dev < 0)
 		return 1;
@@ -174,7 +314,7 @@ static void camera_capture()
 
 	/* Queue the buffers. */
 	for (i = 0; i < nbufs; ++i) {
-		memset(&buf, 0, sizeof buf);
+		memset(&buf, 0, sizeof(buf));
 		buf.index = i;
 		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		buf.memory = V4L2_MEMORY_MMAP;
@@ -189,17 +329,35 @@ static void camera_capture()
 	/* Start streaming. */
 	video_enable(dev, 1);
 
+#if DEBUG
+		printf("enable stream\n");
+#endif
+
 	for (i = 0; i <= 300; ++i) {
 		/* Dequeue a buffer. */
-		memset(&buf, 0, sizeof buf);
+
+#if DEBUG
+		printf("dequeque buffer start\n");
+#endif
+
+		memset(&buf, 0, sizeof(buf));
 		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		buf.memory = V4L2_MEMORY_MMAP;
+
+#if DEBUG
+		printf("dequeque buffer ioctl\n");
+#endif
+
 		ret = ioctl(dev, VIDIOC_DQBUF, &buf);
 		if (ret < 0) {
 			printf("Unable to dequeue buffer (%d).\n", errno);
 			close(dev);
 			return 1;
 		}
+
+#if DEBUG
+		printf("dequeque buffer\n");
+#endif
 
 		gettimeofday(&ts, NULL);
 		printf("%u %u bytes %ld.%06ld %ld.%06ld\n", i, buf.bytesused,
@@ -209,31 +367,25 @@ static void camera_capture()
 		if (i == 0)
 			start = ts;
 
-		/* Save the image. */
-		if (do_save && !skip) {
-			sprintf(filename, "frame-%06u.bin", i);
-			file = fopen(filename, "wb");
-			if (file != NULL) {
-				fwrite(mem[buf.index], buf.bytesused, 1, file);
-				fclose(file);
-			}
-		}
-		if (skip)
-			--skip;
-
 		/* Record the H264 video file */
-		if(do_record)
-		{
-			if(rec_fp == NULL)
-				rec_fp = fopen(rec_filename, "a+b");
+		if(rec_fp == NULL)
+			rec_fp = fopen(rec_filename, "a+b");
 
-			if(rec_fp != NULL)
-			{
-				fwrite(mem[buf.index], buf.bytesused, 1, rec_fp);
-			}
-			/* fclose(rec_fp); */
+#if DEBUG
+		printf("open fd\n");
+#endif
+
+		if(rec_fp != NULL)
+		{
+			fwrite(mem[buf.index], buf.bytesused, 1, rec_fp);
 		}
 
+		/* fclose(rec_fp); */
+
+#if DEBUG
+		printf("fwrite\n");
+#endif
+			
 		/* Requeue the buffer. */
 		if (delay > 0)
 			usleep(delay * 1000);
@@ -245,136 +397,50 @@ static void camera_capture()
 			return 1;
 		}
 
+#if DEBUG
+		printf("queque buffer\n");
+#endif
+
 		fflush(stdout);
+
+#if DEBUG
+		printf("fflush\n");
+		printf("------------------\n");
+#endif
+
 	}
 	gettimeofday(&end, NULL);
-	printf("come here 9 \n");
-	while(1)
-	{
-		sleep(100);
-	}
+	printf("300 frames completed!!\n");
+	sleep(2);
 
 	/* Stop streaming. */
 	video_enable(dev, 0);
 
+	fclose(rec_fp);
+
+	end.tv_sec -= start.tv_sec;
+	end.tv_usec -= start.tv_usec;
+	if (end.tv_usec < 0) {
+		end.tv_sec--;
+		end.tv_usec += 1000000;
+	}
+	fps = (i-1)/(end.tv_usec+1000000.0*end.tv_sec)*1000000.0;
+
+	printf("Captured %u frames in %lu.%06lu seconds (%f fps).\n",
+			i-1, end.tv_sec, end.tv_usec, fps);
+
+	close(dev);
 }
 
-static void video_decode_example(const char *outfilename, const char *filename)
-{
 
-    AVCodec *codec;  
-    AVCodecContext *c= NULL;  
-    int frame, got_picture, len;  
-    FILE *f, *fout;  
-    AVFrame *picture;  
-    uint8_t inbuf[INBUF_SIZE + FF_INPUT_BUFFER_PADDING_SIZE];  
-    char buf[1024];  
-    AVPacket avpkt;  
-   
-    av_init_packet(&avpkt);  
-   
-    /* set end ofbuffer to 0 (this ensures that no overreading happens for damaged mpeg streams)*/  
-    memset(inbuf + INBUF_SIZE, 0, FF_INPUT_BUFFER_PADDING_SIZE);  
-   
-    printf("Videodecoding\n");  
-    //opts = NULL;  
-    /* find the h264video decoder */  
-    codec = avcodec_find_decoder(CODEC_ID_H264);  
-    if (!codec){  
-        fprintf(stderr, "codecnot found\n");  
-        return ;  
-    }  
-   
-    c = avcodec_alloc_context3(codec);  
-    picture= avcodec_alloc_frame();  
-   
-    if(codec->capabilities&CODEC_CAP_TRUNCATED)  
-    c->flags|= CODEC_FLAG_TRUNCATED; /* we do not send complete frames */  
-   
-    /* For somecodecs, such as msmpeg4 and mpeg4, width and height 
-    MUST be initialized there because thisinformation is not 
-    available in the bitstream. */  
-   
-    /* open it */  
-    if(avcodec_open2(c, codec, NULL) < 0) {  
-        fprintf(stderr, "couldnot open codec\n");  
-        exit(1);  
-    }  
-   
-    /* the codec givesus the frame size, in samples */  
-   
-    f = fopen(filename, "rb");  
-    if (!f) {  
-        fprintf(stderr, "couldnot open %s\n", filename);  
-        exit(1);  
-    }  
-     //解码与显示需要的辅助的数据结构，需要注意的是，AVFrame必须经过alloc才能使用，不然其内存的缓存空间指针是空的，程序会崩溃  
-    AVFrame frameRGB;  
-    cvNamedWindow("decode", CV_WINDOW_AUTOSIZE);  
-    frame = 0;  
-    for(;;) {  
-   
-        build_avpkt(&avpkt, f);  
-   
-        if(avpkt.size == 0)  
-            break;  
-   
-        while(avpkt.size > 0) {  
-            len = avcodec_decode_video2(c,picture, &got_picture, &avpkt);//解码每一帧  
-
-			IplImage *showImage = cvCreateImage(cvSize(picture->width, picture->height), 8, 3);  
-            avpicture_alloc((AVPicture*)&frameRGB, PIX_FMT_RGB24, picture->width, picture->height);  
-
-            if(len < 0) {  
-                fprintf(stderr, "Error while decoding frame %d\n",frame);  
-                break;  
-            }  
-            if(got_picture) {  
-                printf("savingframe %3d\n", frame);  
-                fflush(stdout);  
-   
-                /* thepicture is allocated by the decoder. no need to free it */  
-               //将YUV420格式的图像转换成RGB格式所需要的转换上下文  
-                struct SwsContext * scxt = sws_getContext(picture->width, picture->height, PIX_FMT_YUV420P,  
-                                                  picture->width, picture->height, PIX_FMT_RGB24,  
-                                                  2,NULL,NULL,NULL);  
-                if(scxt != NULL)  
-                {  
-                    sws_scale(scxt, picture->data, picture->linesize, 0, c->height, frameRGB.data, frameRGB.linesize);//图像格式转换  
-                    showImage->imageSize = frameRGB.linesize[0];//指针赋值给要显示的图像  
-                    showImage->imageData = (char *)frameRGB.data[0];  
-                    cvShowImage("decode", showImage);//显示  
-                    cvWaitKey(50);//设置0.5s显示一帧，如果不设置由于这是个循环，会导致看不到显示出来的图像  
-                }
-                //sprintf(buf,outfilename,frame);  
-   
-                //pgm_save(picture->data[0],picture->linesize[0],  
-                //c->width,c->height, buf);  
-                //pgm_save(picture->data[1],picture->linesize[1],  
-                //c->width/2,c->height/2, fout);  
-                //pgm_save(picture->data[2],picture->linesize[2],  
-                //c->width/2,c->height/2, fout);   
-				sws_freeContext(scxt);
-                frame++;  
-            }  
-            avpkt.size -= len;  
-            avpkt.data += len;  
-        }  
-    }  
-   
-    fclose(f);  
-   
-    avcodec_close(c);  
-    av_free(c);  
-    av_free(picture);  
-    printf("\n");  
-}
 
 int main(int argc, char **argv)
 {
+
     /* register all the codecs */
     avcodec_register_all();
 
+    camera_capture();
     video_decode_example("test%02d.pgm", "RecordH264.h264");
     return 1;
 
